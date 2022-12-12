@@ -115,6 +115,7 @@ impl DiskInode {
         self.type_ == DiskInodeType::File
     }
     /// Get the number of data blocks corresponding to size
+    /// 目前本DiskInode保存的数据一共用了数据区的多少个block
     pub fn data_blocks(&self) -> u32 {
         Self::_data_blocks(self.size)
     }
@@ -122,6 +123,7 @@ impl DiskInode {
         (size + BLOCK_SZ as u32 - 1) / BLOCK_SZ as u32
     }
     /// Get the number of data blocks required for the given size of data
+    /// 存储本DishInode表示的这段数据一共需要多少个位于数据块区域的block(包括数据本身的存储和非直接索引的存储)
     pub fn total_blocks(size: u32) -> u32 {
         let data_blocks = Self::_data_blocks(size) as usize;
         let mut total = data_blocks as usize;
@@ -138,11 +140,20 @@ impl DiskInode {
         total as u32
     }
     /// Get the number of data blocks that have to be allocated given the new size of data
+    /// 当数据量增加到new_size时，一共需要额外申请多少个位于数据块区域的block
     pub fn blocks_num_needed(&self, new_size: u32) -> u32 {
         assert!(new_size >= self.size);
         Self::total_blocks(new_size) - Self::total_blocks(self.size)
     }
+
+    /// Get the number of data blocks that have to be allocated given the new size of data
+    /// 当数据量减少到new_size时，一共需要返还多少个位于数据块区域的block
+    pub fn blocks_num_unneeded(&self, new_size: u32) -> u32 {
+        assert!(new_size <= self.size);
+        Self::total_blocks(self.size) - Self::total_blocks(new_size)
+    }
     /// Get id of block given inner id
+    /// 给定一个数据块在DiskInode内部的下标，算出他在数据块区域的下标
     pub fn get_block_id(&self, inner_id: u32, block_device: &Arc<dyn BlockDevice>) -> u32 {
         let inner_id = inner_id as usize;
         if inner_id < INODE_DIRECT_COUNT {
@@ -174,6 +185,7 @@ impl DiskInode {
         }
     }
     /// Inncrease the size of current disk inode
+    /// 将new_blocks中的所有block_id放到本DiskInode中
     pub fn increase_size(
         &mut self,
         new_size: u32,
@@ -255,8 +267,102 @@ impl DiskInode {
             }
         });
     }
+
+    pub fn decrease_size(
+        &mut self,
+        new_size: u32,
+        block_device: &Arc<dyn BlockDevice>,
+    ) -> Vec<u32> {
+        let mut v: Vec<u32> = Vec::new();
+        let new_blocks_needed = Self::total_blocks(new_size) as usize;
+        let mut data_blocks = self.data_blocks() as usize;
+        self.size = new_size;
+        let mut current_blocks = new_blocks_needed;
+        // direct
+        while current_blocks < data_blocks.min(INODE_DIRECT_COUNT) {
+            v.push(self.direct[current_blocks]);
+            self.direct[current_blocks] = 0;
+            current_blocks += 1;
+        }
+        // indirect1 block
+        if data_blocks > INODE_DIRECT_COUNT {
+            v.push(self.indirect1);
+            data_blocks -= INODE_DIRECT_COUNT;
+            current_blocks = 0;
+        } else {
+            return v;
+        }
+        // indirect1
+        get_block_cache(
+            self.indirect1 as usize,
+            Arc::clone(block_device),
+        )
+        .lock()
+        .modify(0, |indirect1: &mut IndirectBlock| {
+            while current_blocks < data_blocks.min(INODE_INDIRECT1_COUNT) {
+                v.push(indirect1[current_blocks]);
+                //indirect1[current_blocks] = 0;
+                current_blocks += 1;
+            }
+        });
+        self.indirect1 = 0;
+        // indirect2 block
+        if data_blocks > INODE_INDIRECT1_COUNT {
+            v.push(self.indirect2);
+            data_blocks -= INODE_INDIRECT1_COUNT;
+        } else {
+            return v;
+        }
+        // indirect2
+        assert!(data_blocks <= INODE_INDIRECT2_COUNT);
+        let a1 = data_blocks / INODE_INDIRECT1_COUNT;
+        let b1 = data_blocks % INODE_INDIRECT1_COUNT;
+        get_block_cache(
+            self.indirect2 as usize,
+            Arc::clone(block_device),
+        )
+        .lock()
+        .modify(0, |indirect2: &mut IndirectBlock| {
+            // full indirect1 blocks
+            for i in 0..a1 {
+                v.push(indirect2[i]);
+                get_block_cache(
+                    indirect2[i] as usize,
+                    Arc::clone(block_device),
+                )
+                .lock()
+                .modify(0, |indirect1: &mut IndirectBlock| {
+                    for j in 0..INODE_INDIRECT1_COUNT {
+                        v.push(indirect1[j]);
+                        //indirect1[j] = 0;
+                    }
+                });
+                //indirect2[i] = 0;
+            }
+            // last indirect1 block
+            if b1 > 0 {
+                v.push(indirect2[a1]);
+                get_block_cache(
+                    indirect2[a1] as usize,
+                    Arc::clone(block_device),
+                )
+                .lock()
+                .modify(0, |indirect1: &mut IndirectBlock| {
+                    for j in 0..b1 {
+                        v.push(indirect1[j]);
+                        //indirect1[j] = 0;
+                    }
+                });
+                //indirect2[a1] = 0;
+            }
+        });
+        self.indirect2 = 0;
+        v
+    }
     /// Clear size to zero and return blocks that should be deallocated
     /// and clear the block contents to zero later
+    /// 将本DiskInode使用的所有数据块区域的block(包括两个indirect用的)对应的block_id都放到一个vector中并返回它。
+    /// 此外还将DiskInode的所有记录block_id
     pub fn clear_size(&mut self, block_device: &Arc<dyn BlockDevice>) -> Vec<u32> {
         let mut v: Vec<u32> = Vec::new();
         let mut data_blocks = self.data_blocks() as usize;
@@ -343,7 +449,9 @@ impl DiskInode {
         self.indirect2 = 0;
         v
     }
+
     /// Read data from current disk inode
+    /// 将文件内容从 offset 字节开始的部分（从block缓存区中读）读到内存中的缓冲区 buf 中，并返回实际读到的字节数
     pub fn read_at(
         &self,
         offset: usize,
@@ -383,6 +491,8 @@ impl DiskInode {
     }
     /// Write data into current disk inode
     /// size must be adjusted properly beforehand
+    /// 将buf中的数据写入本DiskInode对应的在数据区的blcok中，开始的位置为offset。
+    /// 这不是插入数据，会将原数据覆盖
     pub fn write_at(
         &mut self,
         offset: usize,
@@ -421,6 +531,7 @@ impl DiskInode {
 }
 
 /// A directory entry
+/// 既是目录项也是文件项
 #[repr(C)]
 pub struct DirEntry {
     name: [u8; NAME_LENGTH_LIMIT + 1],

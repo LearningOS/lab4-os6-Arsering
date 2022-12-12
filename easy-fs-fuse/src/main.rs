@@ -12,6 +12,7 @@ const BLOCK_NUM: usize = 131072; //64*2048
 /// Wrapper for turning a File into a BlockDevice
 struct BlockFile(Mutex<File>);
 
+/// 这里将ubuntu中的一个文件当作一块设备，并利用Rust标准库来模拟块设备的读取和写入
 impl BlockDevice for BlockFile {
     /// Read a block from file
     fn read_block(&self, block_id: usize, buf: &mut [u8]) {
@@ -65,7 +66,7 @@ fn easy_fs_pack() -> std::io::Result<()> {
     })));
     let efs = EasyFileSystem::create(block_file.clone(), BLOCK_NUM as u32, 1);
     let root_inode = Arc::new(EasyFileSystem::root_inode(&efs));
-    let apps: Vec<_> = read_dir(src_path)
+    let mut apps: Vec<_> = read_dir(src_path)
         .unwrap()
         .into_iter()
         .map(|dir_entry| {
@@ -74,6 +75,7 @@ fn easy_fs_pack() -> std::io::Result<()> {
             name_with_ext
         })
         .collect();
+    apps.sort();
     for app in apps {
         // load app data (elf) from host file system
         let mut host_file = File::open(format!("{}{}", target_path, app)).unwrap();
@@ -99,11 +101,14 @@ fn efs_test() -> std::io::Result<()> {
             .write(true)
             .create(true)
             .open("target/fs.img")?;
-        f.set_len(BLOCK_NUM * BLOCK_SZ).unwrap();
+        f.set_len((BLOCK_NUM * BLOCK_SZ) as u64).unwrap();
         f
     })));
+    // 为block_file创建一个efs，创建的过程中会将efs相关的数据存到block_file这个设备的超级块中，所以没必要保存，要的时候直接从block_file中读
     EasyFileSystem::create(block_file.clone(), 4096, 1);
+    // 从block_file中读取刚刚创建的efs
     let efs = EasyFileSystem::open(block_file.clone());
+
     let root_inode = EasyFileSystem::root_inode(&efs);
     root_inode.create("filea");
     root_inode.create("fileb");
