@@ -23,7 +23,9 @@ CHAPTER ?= 6
 TEST ?= $(CHAPTER)
 BASE ?= 1
 
-build: env $(KERNEL_BIN) fs-img
+# build: env $(KERNEL_BIN) fs-img
+
+build: $(KERNEL_BIN) fs-img
 
 fs-img: $(APPS)
 	@make -C ../user build TEST=$(TEST) CHAPTER=$(CHAPTER) BASE=$(BASE)

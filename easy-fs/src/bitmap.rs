@@ -13,8 +13,8 @@ const BLOCK_BITS: usize = BLOCK_SZ * 8;
 
 /// A bitmap
 pub struct Bitmap {
-    start_block_id: usize,
-    blocks: usize,
+    start_block_id: usize, // 所在区域的起始块编号
+    blocks: usize, // 区域的长度为多少个块
 }
 
 /// Decompose bits into (block_pos, bits64_pos, inner_pos)
@@ -71,6 +71,8 @@ impl Bitmap {
         });
     }
     /// Get the max number of allocatable blocks
+    /// 索引位图的每一个比特都代表了一个索引节点的分配情况
+    /// 本函数返回本索引位图一共可以表示多少索引节点的状态（已分配/未分配）
     pub fn maximum(&self) -> usize {
         self.blocks * BLOCK_BITS
     }
